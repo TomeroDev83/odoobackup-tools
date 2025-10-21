@@ -45,9 +45,9 @@ validate_pg_connection() {
 spinner() {
     local pid1=$1
     local pid2=$2
-    local msg="WORKING"
+    local msg="${3:-WORKING}"
     local count=0
-    while kill -0 "$pid1" 2>/dev/null || kill -0 "$pid2" 2>/dev/null; do
+    while { kill -0 "$pid1" 2>/dev/null || { [[ -n "$pid2" ]] && kill -0 "$pid2" 2>/dev/null; }; }; do
         ((count=(count+1)%6))
         dots=$(printf "%-${count}s" "." | tr ' ' '.')
         printf "\r%s%s" "$msg" "$dots"
@@ -93,20 +93,25 @@ check_write_permissions() {
 }
 
 cleanup() {
-    # Clean temporary files
+    # Clean temporary directories
     [[ -n "$FOLDER_TMP" && -d "$FOLDER_TMP" ]] && rm -rf "$FOLDER_TMP"
 
-    # Remove DB only if there was a failure
+    # Clean temporary neutralize file
+    [[ -n "$TMP_SQL" && -f "$TMP_SQL" ]] && rm -f "$TMP_SQL"
+
+    # Remove DB only if there was a failure during import
     if [[ "$MODE" == "import" && "$DB_CREATED" == "1" && "$IMPORT_SUCCESS" != "1" ]]; then
         echo "❌ Removing incomplete database $DBNAME..."
         PGPASSWORD="$DBPASS" dropdb -U "$DBUSER" "$DBNAME" 2>/dev/null
     fi
 }
 
+
 parse_args() {
     case "${1:-}" in
         export) MODE="export"; shift ;;
         import) MODE="import"; shift ;;
+        neutralize) MODE="neutralize"; shift ;;
         help) show_help ;;
         *) show_help ;;
     esac
@@ -119,6 +124,7 @@ parse_args() {
             z) ZIP="$OPTARG" ;;
             c) CONF="$OPTARG" ;;
             f) FILESTORE="$OPTARG" ;;
+            n) NEUTRALIZE_PATHS="$OPTARG" ;;
             :) echo "❌ Error: option -$OPTARG requires an argument"; exit 1 ;;
             \?) echo "❌ Error: invalid option -$OPTARG"; exit 1 ;;
         esac
@@ -127,6 +133,7 @@ parse_args() {
 
 export_db() {
     [[ -z "$DBNAME" ]] && { echo "ERROR: -d DBNAME is required"; exit 1; }
+    [[ -z "$DBUSER" ]] && { echo "ERROR: -u DBUSER is required"; exit 1; }
     [[ -z "$FILESTORE" ]] && FILESTORE="$HOME$DEFAULT"
     validate_db_connection "$DBNAME" "$DBUSER" "$DBPASS"
     mkdir -p "$FOLDER_TMP" && cd "$FOLDER_TMP"
@@ -156,6 +163,86 @@ export_db() {
     exit 0
 }
 
+neutralize_db() {
+    echo "🔹 Starting neutralization process..."
+
+    # Validar inputs
+    [[ -z "$DBNAME" || -z "$DBUSER" || -z "$DBPASS" ]] && {
+        echo "❌ Missing database credentials."
+        return 1
+    }
+
+    # Solo validar conexión si se ejecuta en modo neutralize
+    if [[ "$MODE" == "neutralize" ]]; then
+        validate_db_connection "$DBNAME" "$DBUSER" "$DBPASS"
+    fi
+
+    # Validar rutas de addons
+    if [[ -z "$NEUTRALIZE_PATHS" ]]; then
+        echo "❌ Missing -N <paths> (addons paths separated by commas)"
+        exit 1
+    fi
+
+    IFS=',' read -ra PATHS <<< "$NEUTRALIZE_PATHS"
+    for path in "${PATHS[@]}"; do
+        if [[ ! -d "$path" ]]; then
+            echo "❌ Addons path not found: $path"
+            exit 1
+        fi
+    done
+
+    # Crear archivo temporal
+    TMP_SQL=$(mktemp /tmp/neutralize_XXXX.sql)
+
+    # Consultar módulos instalados
+    echo "📦 Fetching installed modules..."
+    MODULES=$(PGPASSWORD="$DBPASS" psql -U "$DBUSER" -d "$DBNAME" -tAc "
+        SELECT name FROM ir_module_module
+        WHERE state IN ('installed', 'to upgrade', 'to remove');
+    ")
+
+    if [[ -z "$MODULES" ]]; then
+        echo "⚠️  No modules found in the database."
+        return 0
+    fi
+
+    # Convertir rutas separadas por coma en array
+    IFS=',' read -ra PATHS <<< "$NEUTRALIZE_PATHS"
+
+    echo "🔍 Searching for neutralize.sql files..."
+
+    for path in "${PATHS[@]}"; do
+        for mod in $MODULES; do
+            FILE="$path/$mod/neutralize.sql"
+            if [[ -f "$FILE" ]]; then
+                echo "✅ Found: $FILE"
+                cat "$FILE" >> "$TMP_SQL"
+                echo "" >> "$TMP_SQL"
+            fi
+        done
+    done
+
+    if [[ ! -s "$TMP_SQL" ]]; then
+        echo "ℹ️ No neutralize.sql scripts found."
+        rm -f "$TMP_SQL"
+        return 0
+    fi
+
+    echo "⚙️  Executing neutralization SQL..."
+    PGPASSWORD="$DBPASS" psql -U "$DBUSER" -d "$DBNAME" -f "$TMP_SQL" >/dev/null 2>&1 &
+    PID_NEUTRALIZE=$!
+    spinner "$PID_NEUTRALIZE" "" "Neutralizing"
+    wait "$PID_NEUTRALIZE"
+
+    if [[ $? -eq 0 ]]; then
+        echo "✅ Neutralization completed successfully."
+    else
+        echo "❌ Error applying neutralize scripts."
+    fi
+
+    rm -f "$TMP_SQL"
+}
+
 import_db() {
     [[ -z "$DBNAME" ]] && { echo "ERROR: -d DBNAME is required"; exit 1; }
     [[ -z "$DBUSER" ]] && { echo "ERROR: -u DBUSER is required"; exit 1; }
@@ -167,7 +254,18 @@ import_db() {
     check_write_permissions "$FILESTORE"
     mkdir -p "$FOLDER_TMP"
     FILES_FILESTORE="$FOLDER_TMP/$DBNAME"
-    unzip -q "$ZIP" -d "$FILES_FILESTORE"
+    echo "Descomprimiendo backup..."
+    unzip -q "$ZIP" -d "$FILES_FILESTORE" &
+    PID_UNZIP=$!
+    spinner "$PID_UNZIP" "UNZIP"  # Llamamos spinner con solo un PID
+    wait "$PID_UNZIP"
+    STATUS_UNZIP=$?
+
+    if [[ $STATUS_UNZIP -ne 0 ]]; then
+        echo "❌ Error al descomprimir el archivo ZIP."
+        exit 1
+    fi
+
     DUMP="$FILES_FILESTORE/dump.sql"
     FILES_FILESTORE="$FILES_FILESTORE/filestore"
     [[ ! -f "$DUMP" || ! -d "$FILES_FILESTORE" ]] && { echo "ERROR: filestore or dump.sql not found in zip"; exit 1; }

@@ -6,7 +6,7 @@ source "$(dirname "$0")/lib/utils.sh"
 # Global variables
 MODE=""
 ORIG_DIR=$(pwd)
-FOLDER_TMP="/tmp/odoobackups"
+FOLDER_TMP=$(mktemp -d /tmp/odoobackups_XXXX)
 CONF=""
 DUMP_NAME="dump.sql"
 DEFAULT="/.local/share/Odoo/filestore"
@@ -17,6 +17,7 @@ ZIP=""
 DBNAME=""
 DBUSER=""
 DBPASS=""
+NEUTRALIZE_PATHS=""
 
 # Automatic cleanup of temporary files
 trap 'cleanup' EXIT
@@ -41,4 +42,9 @@ if [[ "$MODE" == "export" ]]; then
     export_db
 elif [[ "$MODE" == "import" ]]; then
     import_db
+    if [[ -n "$NEUTRALIZE_PATHS" ]]; then
+        neutralize_db
+    fi
+elif [[ "$MODE" == "neutralize" ]]; then
+    neutralize_db
 fi
