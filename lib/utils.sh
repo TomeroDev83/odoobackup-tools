@@ -108,6 +108,29 @@ cleanup() {
     fi
 }
 
+# Detect Odoo major version from database
+get_odoo_major_version() {
+    local dbname="$1"
+    local dbuser="$2"
+    local dbpass="$3"
+
+    # Consultar la versión desde el módulo 'base'
+    RAW_VERSION=$(PGPASSWORD="$dbpass" psql -U "$dbuser" -d "$dbname" -tAc "
+        SELECT latest_version
+          FROM ir_module_module
+         WHERE name='base';
+    " 2>/dev/null | tr -d '[:space:]')
+
+    if [[ -z "$RAW_VERSION" ]]; then
+        echo "⚠️  Could not detect Odoo version, defaulting to 16"
+        echo "16"
+        return
+    fi
+
+    # Extraer solo el primer número (major version)
+    MAJOR_VERSION=$(echo "$RAW_VERSION" | cut -d'.' -f1)
+    echo "$MAJOR_VERSION"
+}
 
 parse_args() {
     case "${1:-}" in
@@ -164,36 +187,52 @@ neutralize_db() {
         PATHS+=("$path")
     done
 
+    # Detect major version
+    ODOO_MAJOR=$(get_odoo_major_version "$DBNAME" "$DBUSER" "$DBPASS")
+    echo "📌 Detected Odoo major version: $ODOO_MAJOR"
+
     # Crear archivo temporal
     TMP_SQL=$(mktemp /tmp/neutralize_XXXX.sql)
 
-    # Consultar módulos instalados
-    echo "📦 Fetching installed modules..."
-    MODULES=$(PGPASSWORD="$DBPASS" psql -U "$DBUSER" -d "$DBNAME" -tAc "
-        SELECT name FROM ir_module_module
-        WHERE state IN ('installed', 'to upgrade', 'to remove');
-    ")
 
-    if [[ -z "$MODULES" ]]; then
-        echo "⚠️  No modules found in the database."
-        return 0
-    fi
+    if (( ODOO_MAJOR < 16 )); then
+        echo "⚠️  Version <16 detected, applying alternative neutralize SQL..."
+        ALT_SQL_FILE="$(dirname "$0")/../sql/neutralize_pre16.sql"
+        if [[ ! -f "$ALT_SQL_FILE" ]]; then
+            echo "❌ Alternative neutralize SQL file not found: $ALT_SQL_FILE"
+            rm -f "$TMP_SQL"
+            exit 1
+        fi
+        cp "$ALT_SQL_FILE" "$TMP_SQL"
+    else
+        # Consultar módulos instalados
+        echo "📦 Fetching installed modules..."
+        MODULES=$(PGPASSWORD="$DBPASS" psql -U "$DBUSER" -d "$DBNAME" -tAc "
+            SELECT name FROM ir_module_module
+            WHERE state IN ('installed', 'to upgrade', 'to remove');
+        ")
 
-    # Convertir rutas separadas por coma en array
-    IFS=',' read -ra PATHS <<< "$NEUTRALIZE_PATHS"
+        if [[ -z "$MODULES" ]]; then
+            echo "⚠️  No modules found in the database."
+            return 0
+        fi
 
-    echo "🔍 Searching for neutralize.sql files..."
+        # Convertir rutas separadas por coma en array
+        IFS=',' read -ra PATHS <<< "$NEUTRALIZE_PATHS"
 
-    for path in "${PATHS[@]}"; do
-        for mod in $MODULES; do
-            # Buscar recursivamente cualquier neutralize.sql dentro de $mod/data/
-            while IFS= read -r file; do
-                echo "✅ Found: $file"
-                cat "$file" >> "$TMP_SQL"
-                echo "" >> "$TMP_SQL"
-            done < <(find "$path" -type f -path "*/$mod/data/neutralize.sql" 2>/dev/null)
+        echo "🔍 Searching for neutralize.sql files..."
+
+        for path in "${PATHS[@]}"; do
+            for mod in $MODULES; do
+                # Buscar recursivamente cualquier neutralize.sql dentro de $mod/data/
+                while IFS= read -r file; do
+                    echo "✅ Found: $file"
+                    cat "$file" >> "$TMP_SQL"
+                    echo "" >> "$TMP_SQL"
+                done < <(find "$path" -type f -path "*/$mod/data/neutralize.sql" 2>/dev/null)
+            done
         done
-    done
+    fi
 
     # Si no hay scripts, salir
     if [[ ! -s "$TMP_SQL" ]]; then
