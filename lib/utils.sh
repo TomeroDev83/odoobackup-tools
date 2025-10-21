@@ -5,8 +5,9 @@ show_help() {
 odoobackup.sh - Tool for exporting/importing Odoo backups
 
 USAGE:
-  $0 export -d <DBname> -u <dbuser> -p <dbpassword> [-c <config.conf>] [-f <filestorepath>]
-  $0 import -z <input.zip> [-c <config.conf>] [-f <filestore_dir>] [-d <dump.sql>] [-n <DBname>] [-u <dbuser>]
+  $0 export -d <DBname> -u <dbuser> [-p <dbpassword>] [-c <config.conf>] [-f <filestorepath>]
+  $0 import -z <input.zip> [-c <config.conf>] [-f <filestore_dir>] [-d <dump.sql>] [-n <DBname>] [-u <dbuser>] [-n <addons_paths>] [-t]
+  $0 neutralize -d <DBname> -u <dbuser> [-p <dbpassword>] -n <addons_paths> [-t]
   $0 help
 
 For more information, check README.md
