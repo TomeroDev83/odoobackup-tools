@@ -23,8 +23,9 @@ load_conf() {
             DBPASS) DBPASS="$value" ;;
             FILESTORE) FILESTORE="$value" ;;
             ZIP) ZIP="$value" ;;
+            NEUTRALIZE_PATHS) NEUTRALIZE_PATHS="value" ;;
         esac
-    done < <(grep -E '^(DBNAME|DBUSER|DBPASS|FILESTORE|ZIP)=' "$conf_file")
+    done < <(grep -E '^(DBNAME|DBUSER|DBPASS|FILESTORE|ZIP|NEUTRALIZE_PATHS)=' "$conf_file")
 }
 
 validate_db_connection() {
@@ -116,7 +117,7 @@ parse_args() {
         *) show_help ;;
     esac
 
-    while getopts ":f:d:z:c:n:u:p:" opt; do
+    while getopts ":d:u:p:z:c:f:n:t" opt; do
         case $opt in
             d) DBNAME="$OPTARG" ;;
             u) DBUSER="$OPTARG" ;;
@@ -125,10 +126,101 @@ parse_args() {
             c) CONF="$OPTARG" ;;
             f) FILESTORE="$OPTARG" ;;
             n) NEUTRALIZE_PATHS="$OPTARG" ;;
+            t) TEST_MODE=1 ;;
             :) echo "❌ Error: option -$OPTARG requires an argument"; exit 1 ;;
             \?) echo "❌ Error: invalid option -$OPTARG"; exit 1 ;;
         esac
     done
+}
+
+neutralize_db() {
+    echo "🔹 Starting neutralization process..."
+
+    # Validar inputs
+    [[ -z "$DBNAME" || -z "$DBUSER" || -z "$DBPASS" ]] && {
+        echo "❌ Missing database credentials."
+        return 1
+    }
+
+    # Solo validar conexión si se ejecuta en modo neutralize
+    if [[ "$MODE" == "neutralize" ]]; then
+        validate_db_connection "$DBNAME" "$DBUSER" "$DBPASS"
+    fi
+
+    # Validar rutas de addons
+    if [[ -z "$NEUTRALIZE_PATHS" ]]; then
+        echo "❌ Missing -N <paths> (addons paths separated by commas)"
+        exit 1
+    fi
+
+    # Separar por comas y limpiar rutas
+    IFS=',' read -ra PATHS_RAW <<< "$NEUTRALIZE_PATHS"
+    PATHS=()
+    for path in "${PATHS_RAW[@]}"; do
+        path=$(echo "$path" | xargs)   # trim espacios
+        path="${path%/}"               # quitar barra final
+        [[ ! -d "$path" ]] && { echo "❌ Addons path not found: $path"; exit 1; }
+        PATHS+=("$path")
+    done
+
+    # Crear archivo temporal
+    TMP_SQL=$(mktemp /tmp/neutralize_XXXX.sql)
+
+    # Consultar módulos instalados
+    echo "📦 Fetching installed modules..."
+    MODULES=$(PGPASSWORD="$DBPASS" psql -U "$DBUSER" -d "$DBNAME" -tAc "
+        SELECT name FROM ir_module_module
+        WHERE state IN ('installed', 'to upgrade', 'to remove');
+    ")
+
+    if [[ -z "$MODULES" ]]; then
+        echo "⚠️  No modules found in the database."
+        return 0
+    fi
+
+    # Convertir rutas separadas por coma en array
+    IFS=',' read -ra PATHS <<< "$NEUTRALIZE_PATHS"
+
+    echo "🔍 Searching for neutralize.sql files..."
+
+    for path in "${PATHS[@]}"; do
+        for mod in $MODULES; do
+            # Buscar recursivamente cualquier neutralize.sql dentro de $mod/data/
+            while IFS= read -r file; do
+                echo "✅ Found: $file"
+                cat "$file" >> "$TMP_SQL"
+                echo "" >> "$TMP_SQL"
+            done < <(find "$path" -type f -path "*/$mod/data/neutralize.sql" 2>/dev/null)
+        done
+    done
+
+    # Si no hay scripts, salir
+    if [[ ! -s "$TMP_SQL" ]]; then
+        echo "ℹ️ No neutralize.sql scripts found."
+        rm -f "$TMP_SQL"
+        return 0
+    fi
+
+    # En modo test/debug solo mostramos info y no ejecutamos SQL
+    if [[ "$TEST_MODE" -eq 1 ]]; then
+        echo "DEBUG: Test mode enabled, skipping SQL execution."
+        rm -f "$TMP_SQL"
+        return 0
+    fi
+
+    echo "⚙️  Executing neutralization SQL..."
+    PGPASSWORD="$DBPASS" psql -U "$DBUSER" -d "$DBNAME" -f "$TMP_SQL" >/dev/null 2>&1 &
+    PID_NEUTRALIZE=$!
+    spinner "$PID_NEUTRALIZE" "" "Neutralizing"
+    wait "$PID_NEUTRALIZE"
+
+    if [[ $? -eq 0 ]]; then
+        echo "✅ Neutralization completed successfully."
+    else
+        echo "❌ Error applying neutralize scripts."
+    fi
+
+    rm -f "$TMP_SQL"
 }
 
 export_db() {
@@ -163,86 +255,6 @@ export_db() {
     exit 0
 }
 
-neutralize_db() {
-    echo "🔹 Starting neutralization process..."
-
-    # Validar inputs
-    [[ -z "$DBNAME" || -z "$DBUSER" || -z "$DBPASS" ]] && {
-        echo "❌ Missing database credentials."
-        return 1
-    }
-
-    # Solo validar conexión si se ejecuta en modo neutralize
-    if [[ "$MODE" == "neutralize" ]]; then
-        validate_db_connection "$DBNAME" "$DBUSER" "$DBPASS"
-    fi
-
-    # Validar rutas de addons
-    if [[ -z "$NEUTRALIZE_PATHS" ]]; then
-        echo "❌ Missing -N <paths> (addons paths separated by commas)"
-        exit 1
-    fi
-
-    IFS=',' read -ra PATHS <<< "$NEUTRALIZE_PATHS"
-    for path in "${PATHS[@]}"; do
-        if [[ ! -d "$path" ]]; then
-            echo "❌ Addons path not found: $path"
-            exit 1
-        fi
-    done
-
-    # Crear archivo temporal
-    TMP_SQL=$(mktemp /tmp/neutralize_XXXX.sql)
-
-    # Consultar módulos instalados
-    echo "📦 Fetching installed modules..."
-    MODULES=$(PGPASSWORD="$DBPASS" psql -U "$DBUSER" -d "$DBNAME" -tAc "
-        SELECT name FROM ir_module_module
-        WHERE state IN ('installed', 'to upgrade', 'to remove');
-    ")
-
-    if [[ -z "$MODULES" ]]; then
-        echo "⚠️  No modules found in the database."
-        return 0
-    fi
-
-    # Convertir rutas separadas por coma en array
-    IFS=',' read -ra PATHS <<< "$NEUTRALIZE_PATHS"
-
-    echo "🔍 Searching for neutralize.sql files..."
-
-    for path in "${PATHS[@]}"; do
-        for mod in $MODULES; do
-            FILE="$path/$mod/neutralize.sql"
-            if [[ -f "$FILE" ]]; then
-                echo "✅ Found: $FILE"
-                cat "$FILE" >> "$TMP_SQL"
-                echo "" >> "$TMP_SQL"
-            fi
-        done
-    done
-
-    if [[ ! -s "$TMP_SQL" ]]; then
-        echo "ℹ️ No neutralize.sql scripts found."
-        rm -f "$TMP_SQL"
-        return 0
-    fi
-
-    echo "⚙️  Executing neutralization SQL..."
-    PGPASSWORD="$DBPASS" psql -U "$DBUSER" -d "$DBNAME" -f "$TMP_SQL" >/dev/null 2>&1 &
-    PID_NEUTRALIZE=$!
-    spinner "$PID_NEUTRALIZE" "" "Neutralizing"
-    wait "$PID_NEUTRALIZE"
-
-    if [[ $? -eq 0 ]]; then
-        echo "✅ Neutralization completed successfully."
-    else
-        echo "❌ Error applying neutralize scripts."
-    fi
-
-    rm -f "$TMP_SQL"
-}
-
 import_db() {
     [[ -z "$DBNAME" ]] && { echo "ERROR: -d DBNAME is required"; exit 1; }
     [[ -z "$DBUSER" ]] && { echo "ERROR: -u DBUSER is required"; exit 1; }
@@ -257,7 +269,7 @@ import_db() {
     echo "Descomprimiendo backup..."
     unzip -q "$ZIP" -d "$FILES_FILESTORE" &
     PID_UNZIP=$!
-    spinner "$PID_UNZIP" "UNZIP"  # Llamamos spinner con solo un PID
+    spinner "$PID_UNZIP" "" "UNZIP"  # Llamamos spinner con solo un PID
     wait "$PID_UNZIP"
     STATUS_UNZIP=$?
 
@@ -288,5 +300,5 @@ import_db() {
     IMPORT_SUCCESS=1
     echo "Operations completed successfully"
     echo "Import completed: $DBNAME"
-    exit 0
+    return 0
 }

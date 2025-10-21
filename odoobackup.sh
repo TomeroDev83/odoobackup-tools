@@ -18,6 +18,7 @@ DBNAME=""
 DBUSER=""
 DBPASS=""
 NEUTRALIZE_PATHS=""
+TEST_MODE=0
 
 # Automatic cleanup of temporary files
 trap 'cleanup' EXIT
@@ -45,6 +46,7 @@ elif [[ "$MODE" == "import" ]]; then
     if [[ -n "$NEUTRALIZE_PATHS" ]]; then
         neutralize_db
     fi
+    exit 0
 elif [[ "$MODE" == "neutralize" ]]; then
     neutralize_db
 fi
