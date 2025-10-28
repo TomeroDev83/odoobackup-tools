@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright 2025 TomeroDev83
+# Licensed under the Apache License, Version 2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 
 # Load utilities
 source "$(dirname "$0")/lib/utils.sh"
