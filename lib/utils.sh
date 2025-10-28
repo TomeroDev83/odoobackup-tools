@@ -6,7 +6,7 @@ odoobackup.sh - Tool for exporting/importing Odoo backups
 
 USAGE:
   $0 export -d <DBname> -u <dbuser> [-p <dbpassword>] [-c <config.conf>] [-f <filestorepath>]
-  $0 import -z <input.zip> [-c <config.conf>] [-f <filestore_dir>] [-d <dump.sql>] [-n <DBname>] [-u <dbuser>] [-n <addons_paths>] [-t]
+  $0 import -z <input.zip> [-c <config.conf>] [-f <filestore_dir>] [-d <dump.sql>] [-n <DBname>] [-u <dbuser>] [-p <dbpassword>] [-n <addons_paths>] [-t]
   $0 neutralize -d <DBname> -u <dbuser> [-p <dbpassword>] -n <addons_paths> [-t]
   $0 help
 
@@ -197,7 +197,7 @@ neutralize_db() {
 
     if (( ODOO_MAJOR < 16 )); then
         echo "⚠️  Version <16 detected, applying alternative neutralize SQL..."
-        ALT_SQL_FILE="$(dirname "$0")/../sql/neutralize_pre16.sql"
+        ALT_SQL_FILE="$(dirname "$0")/sql/neutralize_pre16.sql"
         if [[ ! -f "$ALT_SQL_FILE" ]]; then
             echo "❌ Alternative neutralize SQL file not found: $ALT_SQL_FILE"
             rm -f "$TMP_SQL"
