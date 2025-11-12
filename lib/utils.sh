@@ -18,6 +18,25 @@ EOF
     exit 0
 }
 
+check_dependencies() {
+    DEPENDENCIES=(
+        "zip"
+        "unzip"
+        "psql"
+        "pg_dump"
+    )
+
+    for cmd in "${DEPENDENCIES[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            echo "❌ Error: The command '$cmd' is not available on the system."
+            echo "Install it before using this tool."
+            exit 1
+        fi
+    done
+
+    echo "✅ Verified dependencies."
+}
+
 load_conf() {
     local conf_file="$1"
     while IFS='=' read -r key value; do

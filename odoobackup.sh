@@ -6,6 +6,9 @@
 # Load utilities
 source "$(dirname "$0")/lib/utils.sh"
 
+# Dependency Checking
+check_dependencies
+
 # Global variables
 MODE=""
 ORIG_DIR=$(pwd)
